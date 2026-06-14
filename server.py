@@ -14,6 +14,7 @@ import logging
 import os
 
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import requests
 
 from config import TELEGRAM_BOT_TOKEN, ZALO_BOT_TOKEN, ENDPOINT_URL, MEMORY_ID
@@ -36,6 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app, resources={r"/chat": {"origins": "*"}, r"/health": {"origins": "*"}})
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
