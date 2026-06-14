@@ -1,0 +1,30 @@
+# TAX AI - Dependencies
+
+# Telegram bot
+python-telegram-bot[job-queue]>=20.0
+
+# Zalo bot chat
+python-zalo-bot>=0.1.9
+
+# Cloudflare bypass for scraping
+cloudscraper>=1.2.71
+
+# Webhook server
+flask>=3.0
+requests>=2.31
+
+# HTML scraping
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# Headless browser (name search)
+playwright>=1.44
+
+# Claude API (NLP - optional)
+anthropic>=0.25
+
+# Environment variables
+python-dotenv>=1.0
+
+# Type hints
+typing-extensions>=4.0
