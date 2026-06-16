@@ -1,0 +1,16 @@
+.env
+.env.*
+.greennode.json
+.agentbase/
+.agentbase-state.json
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.git/
+.gitignore
+*.md
+telegram_bot.py
+zalo_bot.py
+main.py
+.claude/

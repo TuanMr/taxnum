@@ -1,0 +1,6 @@
+{
+  "endpoint": "https://endpoint-a8fb1754-4339-4474-85cf-3a43d3e3c5b2.agentbase-runtime.aiplatform.vngcloud.vn",
+  "runtime_id": "runtime-5a8d2ef7-d92f-4a64-bb31-1ad206dada23",
+  "image": "vcr.vngcloud.vn/111480-abp111757/tax-ai:v20260613140319",
+  "deployed_at": "2026-06-13T14:04:48.2668949+07:00"
+}
