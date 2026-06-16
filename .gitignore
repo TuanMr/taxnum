@@ -1,9 +1,4 @@
-.env
-__pycache__/
-*.pyc
-*.log
-.telegram-token.txt
-.zalo-token.txt
-.agentbase-memory.json
-.agentbase-state.json
-.agentbase-zalo.json
+.env  
+__pycache__/  
+*.pyc  
+*.log 
