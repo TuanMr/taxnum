@@ -46,8 +46,11 @@ class PersonalTaxInfo:
         if self.mst:
             lines.append(f"🔢 MST cá nhân: `{self.mst}`")
         if self.status:
-            emoji = "✅" if "hoạt động" in self.status.lower() else "❌"
-            lines.append(f"{emoji} Trạng thái: {self.status}")
+            if "đang hoạt động" in self.status.lower():
+                lines.append(f"✅ Trạng thái: {self.status}")
+            else:
+                lines.append(f"[[R]]❌ Trạng thái: {self.status}[[/R]]")
+                lines.append(f"[[R]]⚠️ CẦN LƯU Ý: NNT không đang hoạt động[[/R]]")
         if self.address:
             lines.append(f"📍 Địa chỉ: {self.address}")
         lines.append(f"🪪 CCCD: `{self.cccd}`")
@@ -87,11 +90,13 @@ class BusinessInfo:
             lines.append(f"📌 Tên ngắn: {self.short_name}")
         if self.international_name:
             lines.append(f"🌐 Tên quốc tế: {self.international_name}")
-        lines += [
-            f"🔢 MST: `{self.mst}`",
-            f"{self.format_status_emoji()} Trạng thái: {self.status}",
-            f"📍 Địa chỉ: {self.address}",
-        ]
+        lines.append(f"🔢 MST: `{self.mst}`")
+        if self.is_active:
+            lines.append(f"✅ Trạng thái: {self.status}")
+        else:
+            lines.append(f"[[R]]❌ Trạng thái: {self.status}[[/R]]")
+            lines.append(f"[[R]]⚠️ CẦN LƯU Ý: NNT không đang hoạt động[[/R]]")
+        lines.append(f"📍 Địa chỉ: {self.address}")
         if self.tax_department:
             lines.append(f"🏛 Cơ quan thuế: {self.tax_department}")
         if self.representative:

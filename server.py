@@ -12,7 +12,8 @@ Endpoints:
 import asyncio
 import logging
 import os
-
+import threading
+import uuid
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import requests
@@ -20,6 +21,7 @@ import requests
 from config import TELEGRAM_BOT_TOKEN, ZALO_BOT_TOKEN, ENDPOINT_URL, MEMORY_ID
 import memory_client as mem
 from mst_lookup import lookup_mst, search_company, is_valid_mst
+from invoice_parser import verify_invoice, format_verify_result
 from ai_handler import (
     extract_intent,
     INTENT_LOOKUP_MST,
@@ -39,6 +41,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app, resources={r"/chat": {"origins": "*"}, r"/health": {"origins": "*"}})
 
+# ── Batch job store (in-memory) ──
+_batch_jobs: dict = {}  # job_id → {status, progress, total, results, error}
+
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # ─────────────────────────────────────────────
@@ -47,7 +52,8 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 @app.route("/", methods=["GET"])
 def index():
-    return send_from_directory("/app", "webchat.html")
+    base = os.path.dirname(os.path.abspath(__file__))
+    return send_from_directory(base, "webchat.html")
 
 
 @app.route("/chat", methods=["POST"])
@@ -128,6 +134,138 @@ def _resolve_search(company: str) -> str:
     if has_mst:
         lines.append("\nGửi MST để xem chi tiết.")
     return "\n".join(lines)
+
+
+@app.route("/invoice", methods=["POST"])
+def invoice_upload():
+    """
+    Upload file hóa đơn điện tử (.xml hoặc .pdf).
+    Form-data: file=<binary>
+    Trả về kết quả kiểm tra MST bên bán/mua + đối chiếu địa chỉ.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "Thiếu field 'file' trong form-data"}), 400
+
+    f = request.files["file"]
+    filename = f.filename or "invoice"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+    if ext not in ("xml", "pdf"):
+        return jsonify({
+            "error": f"Định dạng không hỗ trợ: .{ext}. Chỉ chấp nhận .xml và .pdf"
+        }), 400
+
+    content = f.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB
+        return jsonify({"error": "File quá lớn (tối đa 10MB)"}), 400
+
+    try:
+        result  = verify_invoice(content, filename)
+        message = format_verify_result(result)
+        return jsonify({"reply": message, "ok": True})
+    except Exception as e:
+        logger.exception("invoice_upload error")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/invoice/batch", methods=["POST"])
+def invoice_batch_start():
+    """
+    Upload nhiều file .xml để kiểm tra hàng loạt.
+    Form-data: files=<file1>,<file2>,...
+    Trả về job_id để poll trạng thái.
+    """
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "Thiếu field 'files' trong form-data"}), 400
+
+    # Read file content trong request context (trước khi thread bắt đầu)
+    file_data = []
+    for f in files:
+        name = f.filename or "invoice.xml"
+        ext  = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+        if ext != "xml":
+            continue
+        content = f.read()
+        if len(content) > 10 * 1024 * 1024:
+            continue
+        file_data.append((name, content))
+
+    if not file_data:
+        return jsonify({"error": "Không có file .xml hợp lệ (tối đa 10MB/file)"}), 400
+
+    job_id = str(uuid.uuid4())[:8]
+    _batch_jobs[job_id] = {
+        "status":   "processing",
+        "progress": 0,
+        "total":    len(file_data),
+        "results":  [],
+        "error":    None,
+    }
+
+    def _process():
+        from invoice_parser import verify_invoice, _extract_batch_row
+        rows = []
+        try:
+            for i, (fname, content) in enumerate(file_data):
+                try:
+                    result = verify_invoice(content, fname)
+                    rows.append(_extract_batch_row(fname, result))
+                except Exception as e:
+                    rows.append({"filename": fname, "parse_error": str(e),
+                                 "invoice_no": "", "invoice_date": "", "signing_time": "",
+                                 "seller_mst": "", "buyer_mst": "",
+                                 "seller_is_active": None, "buyer_is_active": None,
+                                 "signing_delay_hours": None, "signing_delay_str": ""})
+                _batch_jobs[job_id]["progress"] = i + 1
+                _batch_jobs[job_id]["results"]  = list(rows)
+            _batch_jobs[job_id]["status"] = "done"
+        except Exception as e:
+            logger.exception("batch processing error")
+            _batch_jobs[job_id]["status"] = "error"
+            _batch_jobs[job_id]["error"]  = str(e)
+
+    threading.Thread(target=_process, daemon=True).start()
+    return jsonify({"job_id": job_id, "total": len(file_data)})
+
+
+@app.route("/invoice/batch/status/<job_id>", methods=["GET"])
+def invoice_batch_status(job_id):
+    job = _batch_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Không tìm thấy job"}), 404
+    return jsonify({
+        "status":   job["status"],
+        "progress": job["progress"],
+        "total":    job["total"],
+        "error":    job.get("error"),
+    })
+
+
+@app.route("/invoice/batch/result/<job_id>", methods=["GET"])
+def invoice_batch_result(job_id):
+    job = _batch_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Không tìm thấy job"}), 404
+    if job["status"] != "done":
+        return jsonify({"error": "Chưa hoàn thành xử lý"}), 400
+
+    try:
+        from invoice_parser import batch_to_excel
+        excel_bytes = batch_to_excel(job["results"])
+        resp = app.make_response(excel_bytes)
+        resp.headers["Content-Type"] = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        resp.headers["Content-Disposition"] = (
+            'attachment; filename="kiem_tra_hoa_don.xlsx"'
+        )
+        resp.headers["Content-Length"] = len(excel_bytes)
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
+    except Exception as e:
+        logger.exception("batch_to_excel error")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/health", methods=["GET"])
@@ -432,108 +570,4 @@ async def _zalo_start(update, context):
 
 
 async def _zalo_help(update, context):
-    await update.message.reply_text(_help_text())
-
-
-async def _zalo_message(update, context):
-    text = update.message.text.strip()
-    chat_id = update.message.chat.id
-
-    actor = f"zalo_{chat_id}"
-    mem.save_local(actor, "user", text)
-    if MEMORY_ID:
-        mem.add_event(MEMORY_ID, actor, "user", text)
-
-    intent_data = extract_intent(text)
-    intent = intent_data.get("intent", "unknown")
-
-    if intent == INTENT_LOOKUP_MST:
-        reply = lookup_mst(intent_data["mst"]).to_message()
-    elif intent in (INTENT_SEARCH_NAME, INTENT_CHECK_STATUS):
-        company = intent_data.get("company_name", "").strip()
-        if company:
-            results = search_company(company)
-            if not results:
-                reply = f"Không tìm thấy: {company}"
-            elif len(results) == 1 and results[0].address:
-                reply = results[0].to_message()
-            else:
-                lines = [f"Tìm thấy {len(results)} kết quả cho {company}:"]
-                for i, biz in enumerate(results[:6], 1):
-                    lines.append(f"{i}. {biz.name} - MST: {biz.mst}")
-                lines.append("Gửi MST để xem chi tiết.")
-                reply = "\n".join(lines)
-        else:
-            reply = "Bạn muốn tìm doanh nghiệp nào? Cung cấp tên hoặc MST."
-    elif intent in (INTENT_GREETING, INTENT_HELP):
-        reply = intent_data.get("response", "Xin chào!")
-    else:
-        from mst_lookup import is_valid_cccd, lookup_by_cccd
-        if is_valid_cccd(text):
-            reply = lookup_by_cccd(text).to_message()
-        elif is_valid_mst(text):
-            reply = lookup_mst(text).to_message()
-        else:
-            reply = intent_data.get("response", "Gửi MST (10 số) hoặc tên DN để tra cứu.")
-
-    await update.message.reply_text(reply)
-
-
-def _init_zalo():
-    global _zalo_bot, _zalo_disp
-    if not _ZALO_OK or not ZALO_BOT_TOKEN:
-        logger.info("Zalo Bot Token not set — skipping Zalo init.")
-        return
-
-    _zalo_bot = ZaloBot(token=ZALO_BOT_TOKEN)
-    _zalo_disp = Dispatcher(_zalo_bot, None, workers=0)
-    _zalo_disp.add_handler(CommandHandler("start", _zalo_start))
-    _zalo_disp.add_handler(CommandHandler("help", _zalo_help))
-    _zalo_disp.add_handler(MessageHandler(zf.TEXT & ~zf.COMMAND, _zalo_message))
-
-    endpoint = ENDPOINT_URL.rstrip("/")
-    if endpoint:
-        try:
-            asyncio.run(_zalo_bot.set_webhook(
-                url=f"{endpoint}/zalo/webhook",
-                secret_token="taxai_zalo"
-            ))
-            logger.info("Zalo webhook set: %s/zalo/webhook", endpoint)
-        except Exception as e:
-            logger.warning("Zalo set_webhook error: %s", e)
-    else:
-        logger.warning("ENDPOINT_URL not set - Zalo webhook not registered.")
-    logger.info("Zalo Bot initialized.")
-
-
-_init_zalo()
-
-
-@app.route("/zalo/webhook", methods=["GET"])
-def zalo_verify():
-    return jsonify({"status": "ok"})
-
-
-@app.route("/zalo/webhook", methods=["POST"])
-def zalo_webhook():
-    if not _zalo_disp or not ZALO_BOT_TOKEN:
-        return jsonify({"status": "zalo_not_configured"}), 200
-    try:
-        secret = request.headers.get("X-Zalo-Secret", "")
-        if secret != "taxai_zalo":
-            return jsonify({"error": "bad secret"}), 403
-        update = request.get_json(force=True)
-        if update:
-            _zalo_disp.process_update(update)
-    except Exception as e:
-        logger.error("Zalo webhook error: %s", e)
-    return jsonify({"status": "ok"}), 200
-
-
-# ─────────────────────────────────────────────
-# Run
-# ─────────────────────────────────────────────
-
-if __name__ == "__main__":
-    logger.info("TAX AI server starting on port 8080")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    await upda
